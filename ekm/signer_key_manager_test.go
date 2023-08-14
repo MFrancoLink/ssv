@@ -1,11 +1,12 @@
 package ekm
 
 import (
-	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/prysmaticlabs/go-bitfield"
 	"github.com/sourcegraph/conc/pool"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 
 	"github.com/bloxapp/ssv/logging"
 	"github.com/bloxapp/ssv/networkconfig"
@@ -231,10 +233,12 @@ func TestSignRoot(t *testing.T) {
 			Message:   msg,
 		}
 
+		start := time.Now()
 		err = types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType, []*spectypes.Operator{{OperatorID: spectypes.OperatorID(1), PubKey: pk.Serialize()}})
 		// res, err := signed.VerifySig(pk)
 		require.NoError(t, err)
 		// require.True(t, res)
+		fmt.Println(time.Since(start))
 	})
 
 	t.Run("pk 2", func(t *testing.T) {
@@ -261,7 +265,7 @@ func TestSignRoot(t *testing.T) {
 		}
 
 		start := time.Now()
-		for i := 0; i < 1000; i++ {
+		for i := 0; i < 100; i++ {
 			err = types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType, []*spectypes.Operator{{OperatorID: spectypes.OperatorID(1), PubKey: pk.Serialize()}})
 			// res, err := signed.VerifySig(pk)
 			require.NoError(t, err)
@@ -271,7 +275,7 @@ func TestSignRoot(t *testing.T) {
 	})
 
 	t.Run("multiple signers", func(t *testing.T) {
-		t.Skip()
+		// t.Skip()
 
 		pk1 := &bls.PublicKey{}
 		require.NoError(t, pk1.Deserialize(_byteArray(pk1Str)))
@@ -352,7 +356,7 @@ func TestSignRoot(t *testing.T) {
 		}
 
 		start := time.Now()
-		for i := 0; i < 1000; i++ {
+		for i := 0; i < 10; i++ {
 			err = types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType,
 				[]*spectypes.Operator{
 					{OperatorID: spectypes.OperatorID(1), PubKey: pk1.Serialize()},
@@ -364,113 +368,245 @@ func TestSignRoot(t *testing.T) {
 	})
 
 	t.Run("multiple signers 2", func(t *testing.T) {
-		t.Skip()
+		// t.Skip()
 
-		pk1 := &bls.PublicKey{}
-		require.NoError(t, pk1.Deserialize(_byteArray(pk1Str)))
-		pk2 := &bls.PublicKey{}
-		require.NoError(t, pk2.Deserialize(_byteArray(pk2Str)))
+		batch_lst := []int{5, 10, 20, 30, 40, 50}
+		N_lst := []int{1500}
+		timeout_lst := []float64{30}
+		num_cpu_lst := []int{4}
+		sleep_lst := []bool{true}
+		total_duration := 1000
+		use_normal_dist := true
 
-		var N = 25_000
-		var msgs = make([]*specqbft.SignedMessage, N)
+		print_sleep_lst := false
 
-		p := pool.New()
-		for i := 0; i < N; i++ {
-			i := i
-			p.Go(func() {
-				msg := specqbft.Message{
-					MsgType:    specqbft.CommitMsgType,
-					Height:     specqbft.Height(rand.Uint64()),
-					Round:      specqbft.Round(3),
-					Identifier: []byte("identifier2"),
-					Root:       [32]byte{4, 5, 6},
+		adjust := []bool{true}
+
+		attack_percentage := []int{0}
+
+		f2, _ := os.Create("./output.txt")
+		defer f2.Close()
+
+		reps := 10
+		rep_i := 1
+		for _, attack_p := range attack_percentage {
+			for _, adj := range adjust {
+				f2.WriteString(fmt.Sprintf("#Adjust:%v\n", adj))
+				rep_i = 1
+				for rep_i <= reps {
+					rep_i += 1
+					for _, Batch := range batch_lst {
+						for _, NumMessages := range N_lst {
+							for _, timeout_v := range timeout_lst {
+								for _, num_cpu := range num_cpu_lst {
+									for _, sleep_v := range sleep_lst {
+										pk1 := &bls.PublicKey{}
+										require.NoError(t, pk1.Deserialize(_byteArray(pk1Str)))
+										pk2 := &bls.PublicKey{}
+										require.NoError(t, pk2.Deserialize(_byteArray(pk2Str)))
+
+										var N = NumMessages
+										var msgs = make([]*specqbft.SignedMessage, N)
+										do_sleep := sleep_v
+										num_cpus := num_cpu // runtime.NumCPU()
+										batch := int(math.Min(float64(Batch), float64(NumMessages)))
+										timeout_time := timeout_v
+										types.Verifier = types.NewBatchVerifier(num_cpus, batch, time.Millisecond*time.Duration(timeout_time))
+										types.Verifier.Adjust = adj
+										go types.Verifier.Start()
+
+										p := pool.New()
+										for i := 0; i < N; i++ {
+											i := i
+											p.Go(func() {
+												msg := specqbft.Message{
+													MsgType:    specqbft.CommitMsgType,
+													Height:     specqbft.Height(rand.Uint64()),
+													Round:      specqbft.Round(3),
+													Identifier: []byte("identifier2"),
+													Root:       [32]byte{4, 5, 6},
+												}
+
+												// sign
+												sig1, err := km.SignRoot(&msg, spectypes.QBFTSignatureType, pk1.Serialize())
+												require.NoError(t, err)
+												sign1 := &bls.Sign{}
+												err = sign1.Deserialize(sig1)
+												require.NoError(t, err)
+
+												sig2, err := km.SignRoot(&msg, spectypes.QBFTSignatureType, pk2.Serialize())
+												require.NoError(t, err)
+												sign2 := &bls.Sign{}
+												err = sign2.Deserialize(sig2)
+												require.NoError(t, err)
+
+												sign := *sign1
+												if attack_p == 0 || i%attack_p != 0 {
+													sign.Add(sign2)
+												}
+
+												// verify
+												msgs[i] = &specqbft.SignedMessage{
+													Signature: sign.Serialize(),
+													Signers:   []spectypes.OperatorID{1, 2},
+													Message:   msg,
+												}
+											})
+										}
+										p.Wait()
+
+										// var total time.Duration
+										// for j := 0; j < 10; j++ {
+										// 	start := time.Now()
+										// 	p = pool.New()
+										// 	for i := range msgs {
+										// 		signed := msgs[i]
+										// 		p.Go(func() {
+										// 			err := types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType,
+										// 				[]*spectypes.Operator{
+										// 					{OperatorID: spectypes.OperatorID(1), PubKey: pk1.Serialize()},
+										// 					{OperatorID: spectypes.OperatorID(2), PubKey: pk2.Serialize()},
+										// 				})
+										// 			require.NoError(t, err)
+										// 		})
+										// 	}
+										// 	p.Wait()
+										// 	fmt.Println(time.Since(start))
+										// 	total += time.Since(start)
+										// }
+										// fmt.Println("avg", total/10)
+
+										f, err := os.Create("./cpu.pprof")
+										require.NoError(t, err)
+										defer f.Close()
+										pprof.StartCPUProfile(f)
+										defer pprof.StopCPUProfile()
+
+										var wg sync.WaitGroup
+										duration := time.Millisecond * time.Duration(total_duration)
+										var total time.Duration
+										start := time.Now()
+										tm := tachymeter.New(&tachymeter.Config{Size: N, HBins: 10})
+										sleep_list := make([]int64, N)
+
+										for i := 0; i < N; i++ {
+											i := i
+											wg.Add(1)
+											go func() {
+												defer wg.Done()
+												// Sleep random value between 0 and 12 seconds
+												start2 := time.Now()
+												sleep := time.Duration(0)
+												if do_sleep {
+													if !use_normal_dist {
+														sleep = time.Duration(rand.Intn(int(duration)))
+													} else {
+														sleep = time.Duration(rand.NormFloat64()*50*float64(time.Millisecond) + float64(duration)/4)
+													}
+													if sleep > duration {
+														sleep = duration
+													}
+													if sleep < 0 {
+														sleep = 0
+													}
+													time.Sleep(sleep)
+													sleep_list[i] = sleep.Milliseconds()
+												}
+
+												signed := msgs[i]
+												types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType,
+													[]*spectypes.Operator{
+														{OperatorID: spectypes.OperatorID(1), PubKey: pk1.Serialize()},
+														{OperatorID: spectypes.OperatorID(2), PubKey: pk2.Serialize()},
+													})
+												// require.NoError(t, err)
+												dur := time.Since(start2) - sleep
+												total += dur
+												tm.AddTime(dur)
+											}()
+										}
+										wg.Wait()
+
+										total_time := time.Since(start)
+										avg_latency := total / time.Duration(N)
+
+										// fmt.Println("Total Run Time:", total_time)
+										// fmt.Println("Average Latency:", avg_latency)
+										// b, _ := json.MarshalIndent(types.Verifier.Stats(), "", "  ")
+										// fmt.Println("Stats:", string(b))
+										// fmt.Println(tm.Calc())
+										// fmt.Println(tm.Calc().Histogram)
+
+										metrics := tm.Calc()
+										cumulative := metrics.Time.Cumulative.Milliseconds()
+										hmean := metrics.Time.HMean.Milliseconds()
+										avg := metrics.Time.Avg.Milliseconds()
+										p50 := metrics.Time.P50.Milliseconds()
+										p75 := metrics.Time.P75.Milliseconds()
+										p95 := metrics.Time.P95.Milliseconds()
+										p99 := metrics.Time.P99.Milliseconds()
+										p999 := metrics.Time.P999.Milliseconds()
+										Long5 := metrics.Time.Long5p.Milliseconds()
+										Short5 := metrics.Time.Short5p.Milliseconds()
+										MaxM := metrics.Time.Max.Milliseconds()
+										MinM := metrics.Time.Min.Milliseconds()
+										RangM := metrics.Time.Range.Milliseconds()
+										StdDevM := metrics.Time.StdDev.Milliseconds()
+										RateSec := metrics.Rate.Second
+										HistogramM := metrics.Histogram
+										HitogramBinSize := metrics.HistogramBinSize
+										Samples := metrics.Samples
+										Count := metrics.Count
+
+										total_requests := types.Verifier.Stats().TotalRequests
+										dup_requests := types.Verifier.Stats().DuplicateRequests
+										total_batches := types.Verifier.Stats().TotalBatches
+										avg_batch_size := types.Verifier.Stats().AverageBatchSize
+										pending_req := types.Verifier.Stats().PendingRequests
+										pending_batches := types.Verifier.Stats().PendingBatches
+										busy_workers := types.Verifier.Stats().BusyWorkers
+										failed_batches := types.Verifier.Stats().FailedBatches
+										failed_requests := types.Verifier.Stats().FailedRequests
+										recent_batches := types.Verifier.Stats().RecentBatchSizes
+										timeouts_triggered := types.Verifier.Stats().TimeoutsTriggered
+
+										slices.Sort[int64](sleep_list)
+
+										ans := fmt.Sprintf("Set(batch=%v,N=%v,timeout=%v,num_cpus=%v,sleep=%v,attack_p=%v, v = ", batch, N, timeout_time, num_cpus, do_sleep, attack_p)
+										ans = ans + fmt.Sprintf("{\"total time\": %v,\"avg latency\": %v,\"cumulative\": %v,\"hmean\": %v,\"avg\": %v,\"p50\": %v,\"p75\": %v,\"p95\": %v,\"p99\": %v,\"p999\": %v,\"Long5\": %v,\"Short5\": %v,\"MaxM\": %v,\"MinM\": %v,\"RangM\": %v,\"StdDevM\": %v,\"RateSec\": %v,\"HistogramM\": %v,\"HistogramBinSize\": %v,\"Samples\": %v,\"Count\": %v,", total_time, avg_latency, cumulative, hmean, avg, p50, p75, p95, p99, p999, Long5, Short5, MaxM, MinM, RangM, StdDevM, RateSec, HistogramM, HitogramBinSize, Samples, Count)
+										ans = ans + fmt.Sprintf("\"total requests\": %v,\"duplicated requests\": %v,\"total batches\": %v,\"avg batch size\": %v,\"pending requests\": %v,\"pending batches\": %v,\"busy workers\": %v,\"failed batches\": %v,\"failed requests\": %v,", total_requests, dup_requests, total_batches, avg_batch_size, pending_req, pending_batches, busy_workers, failed_batches, failed_requests)
+										ans = ans + "\"recent batches\": " + strings.Replace(fmt.Sprintf("%v,", recent_batches), " ", ",", -1)
+
+										sum_recent := 0
+										for _, v := range recent_batches {
+											sum_recent += int(v)
+										}
+										ans = ans + "\"recent batches avg\": " + fmt.Sprintf("%v,", (sum_recent)/len(recent_batches))
+										ans = ans + "\"timeouts triggered\": " + fmt.Sprintf("%v,", (timeouts_triggered))
+
+										if print_sleep_lst {
+											ans = ans + "\"sleep list\": " + strings.Replace(fmt.Sprintf("%v,", sleep_list), " ", ",", -1)
+										}
+										ans = ans + "})\n"
+										ans = strings.Replace(ans, "true", "True", -1)
+										ans = strings.Replace(ans, "false", "False", -1)
+										ans = strings.Replace(ans, "ms,", ",", -1)
+										ans = strings.Replace(ans, "HistogramM\":", "HistogramM\":\"\"\"", -1)
+										ans = strings.Replace(ans, ",\"HistogramBinSize\"", "\"\"\",\"HistogramBinSize\"", -1)
+										ans = strings.Replace(ans, "µs,", "*pow(10,-3),", -1)
+										ans = strings.Replace(ans, "s,", "*pow(10,3),", -1)
+										ans = strings.Replace(ans, "NaN", "1", -1)
+										f2.WriteString(ans)
+										f2.Sync()
+										// fmt.Print(ans)
+										// fmt.Print("\"================================================================================================================\"\n")
+									}
+								}
+							}
+						}
+					}
 				}
-
-				// sign
-				sig1, err := km.SignRoot(&msg, spectypes.QBFTSignatureType, pk1.Serialize())
-				require.NoError(t, err)
-				sign1 := &bls.Sign{}
-				err = sign1.Deserialize(sig1)
-				require.NoError(t, err)
-
-				sig2, err := km.SignRoot(&msg, spectypes.QBFTSignatureType, pk2.Serialize())
-				require.NoError(t, err)
-				sign2 := &bls.Sign{}
-				err = sign2.Deserialize(sig2)
-				require.NoError(t, err)
-
-				sign := *sign1
-				sign.Add(sign2)
-
-				// verify
-				msgs[i] = &specqbft.SignedMessage{
-					Signature: sign.Serialize(),
-					Signers:   []spectypes.OperatorID{1, 2},
-					Message:   msg,
-				}
-			})
+			}
 		}
-		p.Wait()
-
-		// var total time.Duration
-		// for j := 0; j < 10; j++ {
-		// 	start := time.Now()
-		// 	p = pool.New()
-		// 	for i := range msgs {
-		// 		signed := msgs[i]
-		// 		p.Go(func() {
-		// 			err := types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType,
-		// 				[]*spectypes.Operator{
-		// 					{OperatorID: spectypes.OperatorID(1), PubKey: pk1.Serialize()},
-		// 					{OperatorID: spectypes.OperatorID(2), PubKey: pk2.Serialize()},
-		// 				})
-		// 			require.NoError(t, err)
-		// 		})
-		// 	}
-		// 	p.Wait()
-		// 	fmt.Println(time.Since(start))
-		// 	total += time.Since(start)
-		// }
-		// fmt.Println("avg", total/10)
-
-		f, err := os.Create("/Users/mosherevah/Downloads/cpu.pprof")
-		require.NoError(t, err)
-		defer f.Close()
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
-
-		var wg sync.WaitGroup
-		duration := time.Millisecond * 12000
-		var total time.Duration
-		start := time.Now()
-		tm := tachymeter.New(&tachymeter.Config{Size: N})
-		for i := 0; i < N; i++ {
-			i := i
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				// Sleep random value between 0 and 12 seconds
-				start2 := time.Now()
-				sleep := time.Duration(rand.Intn(int(duration)))
-				time.Sleep(sleep)
-
-				signed := msgs[i]
-				err := types.VerifyByOperators(signed.GetSignature(), signed, networkconfig.TestNetwork.Domain, spectypes.QBFTSignatureType,
-					[]*spectypes.Operator{
-						{OperatorID: spectypes.OperatorID(1), PubKey: pk1.Serialize()},
-						{OperatorID: spectypes.OperatorID(2), PubKey: pk2.Serialize()},
-					})
-				require.NoError(t, err)
-				dur := time.Since(start2) - sleep
-				total += dur
-				tm.AddTime(dur)
-			}()
-		}
-		wg.Wait()
-		fmt.Println("Total Run Time:", time.Since(start))
-		fmt.Println("Average Latency:", total/time.Duration(N))
-		b, _ := json.MarshalIndent(types.Verifier.Stats(), "", "  ")
-		fmt.Println("Stats:", string(b))
-		fmt.Println(tm.Calc())
 	})
 }

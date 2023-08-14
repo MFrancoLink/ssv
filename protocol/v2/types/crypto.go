@@ -135,7 +135,7 @@ func rootHex(r [32]byte) string {
 var Verifier = NewBatchVerifier(runtime.NumCPU(), 14, time.Millisecond*50)
 
 func init() {
-	go Verifier.Start()
+	// go Verifier.Start()
 }
 
 const messageSize = 32
@@ -171,19 +171,22 @@ type BatchVerifier struct {
 	pending requests
 	mu      sync.Mutex
 
+	Adjust bool
+
 	batches chan []*SignatureRequest // Channel to receive batches of requests.
 
 	busyWorkers atomic.Int32 // Count of currently busy workers.
 
 	// debug struct to calculate the average batch size.
 	debug struct {
-		lens       [8 * 1024]byte // Lengths of the batches.
-		n          int            // Number of batches processed.
-		reqs       int            // Number of requests processed.
-		dups       int            // Number of duplicate message requests.
-		fails      int            // Number of failed batches.
-		failReqs   int            // Number of requests in failed batches.
-		sync.Mutex                // Mutex to guard access to the debug fields.
+		lens              [8 * 1024]byte // Lengths of the batches.
+		n                 int            // Number of batches processed.
+		reqs              int            // Number of requests processed.
+		dups              int            // Number of duplicate message requests.
+		fails             int            // Number of failed batches.
+		failReqs          int            // Number of requests in failed batches.
+		sync.Mutex                       // Mutex to guard access to the debug fields.
+		timeout_triggered int
 	}
 }
 
@@ -204,6 +207,7 @@ func NewBatchVerifier(concurrency, batchSize int, timeout time.Duration) *BatchV
 		ticker:      time.NewTicker(timeout),
 		pending:     make(requests),
 		batches:     make(chan []*SignatureRequest, concurrency*2),
+		Adjust:      true,
 	}
 }
 
@@ -253,10 +257,12 @@ func (b *BatchVerifier) AggregateVerify(signature *bls.Sign, pks []bls.PublicKey
 		b.batches <- maps.Values(batch)
 	} else {
 		// Batch has grown: adjust the timer.
-		b.timer.Stop()
-		t := b.adaptiveTimeout(len(b.pending))
-		b.timer.Reset(t)
-		b.started = time.Now()
+		if b.Adjust {
+			b.timer.Stop()
+			t := b.adaptiveTimeout(len(b.pending))
+			b.timer.Reset(t)
+			b.started = time.Now()
+		}
 		b.mu.Unlock()
 	}
 
@@ -333,6 +339,7 @@ func (b *BatchVerifier) worker() {
 
 			if len(batch) > 0 {
 				b.verify(maps.Values(batch))
+				b.debug.timeout_triggered += 1
 			}
 		}
 	}
@@ -349,6 +356,7 @@ type Stats struct {
 	FailedBatches     int
 	FailedRequests    int
 	RecentBatchSizes  [32]byte
+	TimeoutsTriggered int
 }
 
 func (b *BatchVerifier) Stats() (stats Stats) {
@@ -360,6 +368,7 @@ func (b *BatchVerifier) Stats() (stats Stats) {
 	stats.TotalBatches = b.debug.n
 	stats.FailedBatches = b.debug.fails
 	stats.FailedRequests = b.debug.failReqs
+	stats.TimeoutsTriggered = b.debug.timeout_triggered
 
 	// Calculate the average batch size.
 	lens := b.debug.lens[:]
