@@ -598,8 +598,6 @@ func TestSignRoot(t *testing.T) {
 										ans = strings.Replace(ans, "NaN", "1", -1)
 										f2.WriteString(ans)
 										f2.Sync()
-										// fmt.Print(ans)
-										// fmt.Print("\"================================================================================================================\"\n")
 									}
 								}
 							}
